@@ -47,15 +47,25 @@ cp .env.example .env     # fill in DATABASE_URL, MQTT_URL, Firebase creds
 npm install
 npx prisma migrate dev --name init
 psql "$DATABASE_URL" -f prisma/sql/config_notify_trigger.sql
-npm run prisma:seed
+psql "$DATABASE_URL" -f prisma/sql/fault_events_unresolved_unique.sql
+npm run prisma:seed       # also creates a demo user/farm/device fixture
 npm run dev               # starts the API on :3000
-npm run simulate           # in a second terminal, once implemented
+npm run simulate           # in a second terminal
 ```
+
+Needs a real, free Supabase (Postgres) project and HiveMQ Cloud Serverless
+cluster to actually run against - `.env` has nothing to point at until those
+exist. A Firebase project (free) is also needed for `requireAuth` and the
+FCM notification channel; WhatsApp (MSG91/WhatsApp Cloud API) credentials
+are optional - those channels run as a logged dry-run until configured.
 
 ## Status
 
-Phase 1 scaffolding: config system, DB schema, and module skeletons are in
-place. Business logic inside each module (`MqttClient`, `CommandManager`,
-`DeviceStatusService`, `AlertManager`, `NotificationDispatcher`, the
-simulator) is the next increment - see the `TODO` comment at the top of
-each file.
+Phase 1 is functionally complete: config system, DB schema, and all module
+business logic (`MqttClient`, `CommandManager`, `DeviceStatusService`,
+`AlertManager`, `NotificationDispatcher`, auth middleware, the simulator)
+are implemented, unit-tested, and wired together in `src/index.ts`. See
+`tests/unit` (runs with no DB) and `tests/integration` (concurrency/race
+tests - needs `TEST_DATABASE_URL`, currently unrun since no live Postgres
+exists yet). Phase 2 is the real STM32F401 + A7670C firmware and field
+hardware - see the Hardware & Protection Addendum.
