@@ -31,6 +31,9 @@ model User {
   email     String?  @unique
   phone     String?  @unique
   name      String?
+  // Registered by the mobile app (POST /me/fcm-token) - without it the FCM
+  // channel has nothing to send to, regardless of Firebase being configured.
+  fcmToken  String?  @map("fcm_token")
   createdAt DateTime @default(now()) @map("created_at")
 
   farms      Farm[]
@@ -77,9 +80,19 @@ model Device {
 // from in-memory state.
 model DeviceStatus {
   deviceId        String    @id @map("device_id")
-  state           String    @default("UNKNOWN") // IDLE/STARTING/RUNNING/STOPPING/FAULT/OFFLINE/UNKNOWN
+  // Last VERIFIED physical/command state - IDLE/STARTING/RUNNING/STOPPING/
+  // FAULT/UNKNOWN. Never set to the literal "OFFLINE" here: connectivity is
+  // tracked separately via isConnected so the UI can show "OFFLINE - last
+  // known: RUNNING - 4 min ago" (architecture v2 §6) instead of losing the
+  // last known state the moment LWT fires.
+  state           String    @default("UNKNOWN")
+  isConnected     Boolean   @default(false) @map("is_connected")
   lastHeartbeatAt DateTime? @map("last_heartbeat_at")
   lastTelemetryAt DateTime? @map("last_telemetry_at")
+  // Timestamp carried on the message that last updated `state` (device's own
+  // clock, falls back to server receipt time) - guards against an
+  // out-of-order/delayed MQTT message regressing a newer known state.
+  stateAt         DateTime? @map("state_at")
   updatedAt       DateTime  @updatedAt @map("updated_at")
 
   device Device @relation(fields: [deviceId], references: [id])
@@ -122,7 +135,10 @@ model DeviceCommand {
   device Device          @relation(fields: [deviceId], references: [id])
   events CommandEvent[]
 
-  @@index([deviceId, sequence])
+  // Enforces that two concurrently-issued commands for the same device can
+  // never be accepted under the same sequence number - the DB itself is the
+  // tie-breaker, not application-level timing.
+  @@unique([deviceId, sequence])
   @@map("device_commands")
 }
 
