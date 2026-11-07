@@ -14,15 +14,21 @@ export async function requireDeviceOwnership(req: Request, res: Response, next: 
     return;
   }
 
-  const device = await prisma.device.findUnique({ where: { id: deviceId }, include: { farm: true } });
-  if (!device) {
-    res.status(404).json({ error: "device not found" });
-    return;
+  // Express 4 does not catch a rejected promise from an async middleware -
+  // without this try/catch, a transient DB error here would leave the
+  // request hanging with no response ever sent, instead of a clean 500.
+  try {
+    const device = await prisma.device.findUnique({ where: { id: deviceId }, include: { farm: true } });
+    if (!device) {
+      res.status(404).json({ error: "device not found" });
+      return;
+    }
+    if (device.farm.ownerUserId !== userId) {
+      res.status(403).json({ error: "not authorized for this device" });
+      return;
+    }
+    next();
+  } catch (err) {
+    next(err);
   }
-  if (device.farm.ownerUserId !== userId) {
-    res.status(403).json({ error: "not authorized for this device" });
-    return;
-  }
-
-  next();
 }

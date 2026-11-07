@@ -2,12 +2,7 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../db/prisma";
 import { ConfigService } from "../config/ConfigService";
 import { channelForAttempt } from "../notifications/channelPriority";
-
-function isUniqueViolation(err: unknown): boolean {
-  const e = err as { code?: string; message?: string } | null;
-  if (!e) return false;
-  return e.code === "P2002" || e.code === "23505" || (typeof e.message === "string" && e.message.includes("23505"));
-}
+import { isUniqueViolation } from "../db/errors";
 
 /**
  * Alert Manager (architecture v2 §9). Writes fault_events + a
