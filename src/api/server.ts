@@ -3,16 +3,24 @@ import rateLimit from "express-rate-limit";
 import { ConfigService } from "../config/ConfigService";
 import { CommandManager } from "../commands/CommandManager";
 import { DeviceStatusService } from "../devices/DeviceStatusService";
+import { DeviceService } from "../devices/DeviceService";
+import { FarmService } from "../farms/FarmService";
 import { prisma } from "../db/prisma";
 import { requireAuth } from "../auth/middleware";
 import { requireDeviceOwnership } from "../middleware/requireDeviceOwnership";
+import { requireFarmOwnership } from "../middleware/requireFarmOwnership";
 import { errorHandler } from "../middleware/errorHandler";
 import { createCommandRequestSchema } from "../dto/commandDto";
+import { createFarmRequestSchema } from "../dto/farmDto";
+import { createDeviceRequestSchema } from "../dto/deviceDto";
+import { paginationQuerySchema } from "../dto/pagination";
 import { ValidationError } from "../errors";
 
 export interface ServerDependencies {
   commandManager: CommandManager;
   deviceStatusService: DeviceStatusService;
+  deviceService: DeviceService;
+  farmService: FarmService;
 }
 
 /**
@@ -49,6 +57,17 @@ export function createServer(config: ConfigService, deps: ServerDependencies): E
   const commandRateLimiter = rateLimit({
     windowMs: 60_000,
     limit: 20,
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) => req.userId ?? req.ip ?? "unknown",
+  });
+
+  // Separate, slightly looser limiter for farm/device create+list - both are
+  // plausible spam/enumeration targets but are called far less often per
+  // user than motor commands.
+  const resourceRateLimiter = rateLimit({
+    windowMs: 60_000,
+    limit: 30,
     standardHeaders: true,
     legacyHeaders: false,
     keyGenerator: (req) => req.userId ?? req.ip ?? "unknown",
@@ -91,15 +110,92 @@ export function createServer(config: ConfigService, deps: ServerDependencies): E
     try {
       const fcmToken = typeof req.body?.fcmToken === "string" ? req.body.fcmToken : null;
       if (!fcmToken) throw new ValidationError("fcmToken (string) is required");
-      // upsert, not update - a Firebase-authenticated user may not have a
-      // Postgres row yet (no separate "provision user" flow exists in
-      // Phase 1), so the first authenticated call from a device creates it.
-      await prisma.user.upsert({
-        where: { id: req.userId! },
-        create: { id: req.userId!, fcmToken },
-        update: { fcmToken },
-      });
+      // requireAuth already guarantees this user's row exists - plain
+      // update, not upsert.
+      await prisma.user.update({ where: { id: req.userId! }, data: { fcmToken } });
       res.status(204).send();
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post("/farms", requireAuth, resourceRateLimiter, async (req, res, next) => {
+    try {
+      const parsed = createFarmRequestSchema.safeParse(req.body);
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+
+      const farm = await deps.farmService.createFarm({
+        ownerUserId: req.userId!,
+        name: parsed.data.name,
+        location: parsed.data.location,
+        id: parsed.data.id,
+      });
+      res.status(201).json(farm);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/farms", requireAuth, async (req, res, next) => {
+    try {
+      const farms = await deps.farmService.listFarms(req.userId!);
+      res.json(farms);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.post(
+    "/farms/:farmId/devices",
+    requireAuth,
+    resourceRateLimiter,
+    requireFarmOwnership,
+    async (req, res, next) => {
+      try {
+        const parsed = createDeviceRequestSchema.safeParse(req.body);
+        if (!parsed.success) throw new ValidationError(parsed.error.message);
+
+        const device = await deps.deviceService.createDevice({
+          farmId: req.params.farmId,
+          name: parsed.data.name,
+          deviceType: parsed.data.deviceType,
+          id: parsed.data.id,
+        });
+        res.status(201).json(device);
+      } catch (err) {
+        next(err);
+      }
+    }
+  );
+
+  app.get("/farms/:farmId/devices", requireAuth, requireFarmOwnership, async (req, res, next) => {
+    try {
+      const devices = await deps.deviceService.listDevices(req.params.farmId);
+      res.json(devices);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/devices/:deviceId/telemetry", requireAuth, requireDeviceOwnership, async (req, res, next) => {
+    try {
+      const parsed = paginationQuerySchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+
+      const page = await deps.deviceService.getTelemetryPage(req.params.deviceId, parsed.data.take, parsed.data.before);
+      res.json(page);
+    } catch (err) {
+      next(err);
+    }
+  });
+
+  app.get("/devices/:deviceId/faults", requireAuth, requireDeviceOwnership, async (req, res, next) => {
+    try {
+      const parsed = paginationQuerySchema.safeParse(req.query);
+      if (!parsed.success) throw new ValidationError(parsed.error.message);
+
+      const page = await deps.deviceService.getFaultsPage(req.params.deviceId, parsed.data.take, parsed.data.before);
+      res.json(page);
     } catch (err) {
       next(err);
     }

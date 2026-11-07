@@ -30,9 +30,11 @@ src/
   auth/          Firebase ID-token verification middleware
   mqtt/          MQTT client (HiveMQ Cloud) - telemetry/state/alert/lwt in, cmd/req out
   commands/      Command Manager - desired-state commands, idempotency, lifecycle
-  devices/       Device status / presence (7-state model, LWT + heartbeat)
+  devices/       Device status/presence + device management (create/list/history)
+  farms/         Farm management (create/list)
   alerts/        Alert Manager - fault_events + notification_outbox (durable)
   notifications/ Notification Dispatcher - FCM / WhatsApp / SMS
+  middleware/    requireDeviceOwnership / requireFarmOwnership / errorHandler
   simulator/     Fake device for Phase 1 (no hardware needed to test the pipeline)
 prisma/
   schema.prisma  Full DB schema, expand-only (add, never drop/rename)
@@ -59,12 +61,20 @@ exist. A Firebase project (free) is also needed for `requireAuth` and the
 FCM notification channel; WhatsApp (MSG91/WhatsApp Cloud API) credentials
 are optional - those channels run as a logged dry-run until configured.
 
+## API
+
+`POST/GET /farms`, `POST/GET /farms/:farmId/devices` (device creation returns
+the HMAC secret exactly once, never again), `GET /devices/:deviceId/status`,
+`GET /devices/:deviceId/telemetry` and `/faults` (cursor-paginated),
+`POST /devices/:deviceId/commands`, `POST /me/fcm-token`. Every authenticated
+request auto-provisions the caller's `users` row on first sight (see
+`requireAuth` in `src/auth/middleware.ts`) - no separate signup endpoint.
+
 ## Status
 
-Phase 1 is functionally complete: config system, DB schema, and all module
-business logic (`MqttClient`, `CommandManager`, `DeviceStatusService`,
-`AlertManager`, `NotificationDispatcher`, auth middleware, the simulator)
-are implemented, unit-tested, and wired together in `src/index.ts`. See
+Phase 1 is functionally complete: config system, DB schema, all module
+business logic, auth/user-provisioning, and farm/device management are
+implemented, unit-tested, and wired together in `src/index.ts`. See
 `tests/unit` (runs with no DB) and `tests/integration` (concurrency/race
 tests - needs `TEST_DATABASE_URL`, currently unrun since no live Postgres
 exists yet). Phase 2 is the real STM32F401 + A7670C firmware and field

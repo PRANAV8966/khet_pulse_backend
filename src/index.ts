@@ -7,6 +7,8 @@ import { CommandManager } from "./commands/CommandManager";
 import { DeviceStatusService } from "./devices/DeviceStatusService";
 import { AlertManager } from "./alerts/AlertManager";
 import { NotificationDispatcher } from "./notifications/NotificationDispatcher";
+import { DeviceService } from "./devices/DeviceService";
+import { FarmService } from "./farms/FarmService";
 
 const COMMAND_SWEEP_INTERVAL_MS = 10_000;
 const OUTBOX_DRAIN_INTERVAL_MS = 5_000;
@@ -19,6 +21,8 @@ async function main() {
   const deviceStatusService = new DeviceStatusService(config);
   const alertManager = new AlertManager(config);
   const notificationDispatcher = new NotificationDispatcher(config);
+  const deviceService = new DeviceService();
+  const farmService = new FarmService();
   const mqttClient = new MqttClient(config);
 
   commandManager.setPublisher(mqttClient);
@@ -51,7 +55,7 @@ async function main() {
 
   await mqttClient.connect();
 
-  const app = createServer(config, { commandManager, deviceStatusService });
+  const app = createServer(config, { commandManager, deviceStatusService, deviceService, farmService });
   const port = Number(process.env.PORT ?? 3000);
   const server = app.listen(port, () => {
     console.log(`[backend] listening on :${port}`);
