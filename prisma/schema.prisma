@@ -1,0 +1,186 @@
+// Expand-only schema: add tables/columns, never drop or rename in place.
+// Postgres is the single source of truth for both domain data and runtime config.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Runtime configuration - the adaptive-architecture mechanism.
+// Every tunable (expiry windows, cooldowns, keep-alive intervals, channel
+// priority, ...) lives here instead of in code or env vars, so changing a
+// value never requires a redeploy. See src/config/ConfigService.ts.
+// ---------------------------------------------------------------------------
+model SystemConfig {
+  key         String   @id
+  value       Json
+  description String?
+  updatedAt   DateTime @updatedAt @map("updated_at")
+  updatedBy   String?  @map("updated_by")
+
+  @@map("system_config")
+}
+
+model User {
+  id        String   @id // Firebase UID
+  email     String?  @unique
+  phone     String?  @unique
+  name      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  farms      Farm[]
+  auditLogs  AuditLog[]
+
+  @@map("users")
+}
+
+model Farm {
+  id          String   @id @default(uuid())
+  ownerUserId String   @map("owner_user_id")
+  name        String
+  location    String?
+  createdAt   DateTime @default(now()) @map("created_at")
+
+  owner   User     @relation(fields: [ownerUserId], references: [id])
+  devices Device[]
+
+  @@map("farms")
+}
+
+model Device {
+  id         String   @id @default(uuid())
+  farmId     String   @map("farm_id")
+  name       String
+  deviceType String   @default("motor_controller") @map("device_type")
+  // HMAC secret reference - in production, point this at a secrets manager
+  // entry id, not the raw secret. Fine as a direct value for the prototype.
+  hmacSecretRef String @map("hmac_secret_ref")
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  farm             Farm               @relation(fields: [farmId], references: [id])
+  status           DeviceStatus?
+  telemetry        Telemetry[]
+  commands         DeviceCommand[]
+  faultEvents      FaultEvent[]
+  notificationRows NotificationOutbox[]
+
+  @@map("devices")
+}
+
+// One row per device - the current, queryable snapshot. Updated by the
+// backend on every heartbeat/telemetry/state message; never derived solely
+// from in-memory state.
+model DeviceStatus {
+  deviceId        String    @id @map("device_id")
+  state           String    @default("UNKNOWN") // IDLE/STARTING/RUNNING/STOPPING/FAULT/OFFLINE/UNKNOWN
+  lastHeartbeatAt DateTime? @map("last_heartbeat_at")
+  lastTelemetryAt DateTime? @map("last_telemetry_at")
+  updatedAt       DateTime  @updatedAt @map("updated_at")
+
+  device Device @relation(fields: [deviceId], references: [id])
+
+  @@map("device_status")
+}
+
+model Telemetry {
+  id         BigInt   @id @default(autoincrement())
+  deviceId   String   @map("device_id")
+  voltageA   Float?   @map("voltage_a")
+  voltageB   Float?   @map("voltage_b")
+  voltageC   Float?   @map("voltage_c")
+  currentA   Float?   @map("current_a")
+  currentB   Float?   @map("current_b")
+  currentC   Float?   @map("current_c")
+  state      String?
+  recordedAt DateTime @default(now()) @map("recorded_at")
+
+  device Device @relation(fields: [deviceId], references: [id])
+
+  @@index([deviceId, recordedAt])
+  @@map("telemetry")
+}
+
+// id doubles as the command UUID - idempotent insert via
+// `ON CONFLICT (id) DO NOTHING`, no extra unique index needed.
+model DeviceCommand {
+  id           String    @id @default(uuid())
+  deviceId     String    @map("device_id")
+  issuedByUserId String  @map("issued_by_user_id")
+  action       String // e.g. SET_MOTOR_STATE
+  desiredState String    @map("desired_state") // ON / OFF
+  sequence     Int
+  status       String    @default("RECEIVED") // RECEIVED/ACCEPTED/ACTUATING/SUCCEEDED/REJECTED/FAILED/TIMED_OUT
+  issuedAt     DateTime  @default(now()) @map("issued_at")
+  expiresAt    DateTime  @map("expires_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  device Device          @relation(fields: [deviceId], references: [id])
+  events CommandEvent[]
+
+  @@index([deviceId, sequence])
+  @@map("device_commands")
+}
+
+model CommandEvent {
+  id        BigInt   @id @default(autoincrement())
+  commandId String   @map("command_id")
+  status    String
+  note      String?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  command DeviceCommand @relation(fields: [commandId], references: [id])
+
+  @@map("command_events")
+}
+
+model FaultEvent {
+  id         BigInt    @id @default(autoincrement())
+  deviceId   String    @map("device_id")
+  type       String // DRY_RUN_DETECTED / OVERLOAD_DETECTED / PHASE_FAILURE / ...
+  detail     Json?
+  createdAt  DateTime  @default(now()) @map("created_at")
+  resolvedAt DateTime? @map("resolved_at")
+
+  device               Device                 @relation(fields: [deviceId], references: [id])
+  notificationOutboxes NotificationOutbox[]
+
+  @@map("fault_events")
+}
+
+// Durable queue between "event detected" and "notification actually sent" -
+// a crash in between can't silently lose an alert.
+model NotificationOutbox {
+  id           BigInt    @id @default(autoincrement())
+  eventType    String    @map("event_type")
+  deviceId     String?   @map("device_id")
+  faultEventId BigInt?   @map("fault_event_id")
+  payload      Json
+  channel      String // FCM / WHATSAPP / SMS
+  status       String    @default("PENDING") // PENDING/SENT/FAILED
+  attempts     Int       @default(0)
+  createdAt    DateTime  @default(now()) @map("created_at")
+  sentAt       DateTime? @map("sent_at")
+
+  device     Device?     @relation(fields: [deviceId], references: [id])
+  faultEvent FaultEvent? @relation(fields: [faultEventId], references: [id])
+
+  @@map("notification_outbox")
+}
+
+model AuditLog {
+  id        BigInt   @id @default(autoincrement())
+  userId    String   @map("user_id")
+  action    String
+  deviceId  String?  @map("device_id")
+  detail    Json?
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("audit_logs")
+}
